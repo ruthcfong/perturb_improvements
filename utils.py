@@ -3,6 +3,8 @@ utils.py
 
 Contains utility functions.
 """
+from collections import OrderedDict
+import copy
 import math
 import os
 
@@ -14,6 +16,112 @@ import matplotlib.pyplot as plt
 
 import matplotlib
 matplotlib.use('Agg')
+
+
+class JoinAndPerturbLayer(nn.Module):
+    def __init__(self, module, device=torch.device('cpu')):
+        super(JoinAndPerturbLayer, self).__init__()
+        self.module = module
+        self.perturbation
+        pass
+
+    def forward(self, x):
+        assert len(x.shape) == 4
+        assert x.size(0) > 1
+        # mask [1, 1, N, W]
+        pass
+
+
+def get_first_module_name(module, running_name=''):
+    if module._modules:
+        next_module_name = list(module._modules)[0]
+        if running_name == '':
+            running_name = next_module_name
+        else:
+            running_name = running_name + '.' + next_module_name
+        return get_first_module_name(module._modules[next_module_name],
+                running_name=running_name)
+    return running_name
+
+
+def get_pytorch_module(net, layer_name):
+    """Return PyTorch module."""
+    modules = layer_name.split('.')
+    if len(modules) == 1:
+        return net._modules.get(layer_name)
+    else:
+        curr_m = net
+        for m in modules:
+            curr_m = curr_m._modules.get(m)
+        return curr_m
+
+
+def replace_module(parent_module, module_path, replacement_module):
+    """Replace a PyTorch module with a replacement module."""
+    if isinstance(parent_module, nn.Sequential):
+        module_dict = OrderedDict()
+    elif isinstance(parent_module, nn.Module):
+        new_parent_module = copy.deepcopy(parent_module)
+    for (k, v) in parent_module._modules.items():
+        if k == module_path[0]:
+            if len(module_path) == 1:
+                child_module = replacement_module
+            else:
+                child_module = replace_module(v, module_path[1:],
+                                              replacement_module)
+        else:
+            child_module = v
+
+        if isinstance(parent_module, nn.Sequential):
+            module_dict[k] = child_module
+        elif isinstance(parent_module, nn.Module):
+            setattr(new_parent_module, k, child_module)
+        else:
+            assert False
+
+    if isinstance(parent_module, nn.Sequential):
+        return nn.Sequential(module_dict)
+    elif isinstance(parent_module, nn.Module):
+        return new_parent_module
+    else:
+        assert False
+
+
+activations = []
+
+def hook_acts(module, input, output):
+    """Forward hook function for saving activations."""
+    activations.append(output)
+
+
+def get_acts(model, input, second_input=None, clone=True):
+    """Returns activations saved using existing hooks."""
+    del activations[:]
+    if second_input is not None:
+        _ = model(input, second_input)
+    else:
+        _ = model(input)
+    if clone:
+        return [a.clone() for a in activations]
+    else:
+        return activations
+
+
+def hook_get_acts(model, layer_names, input, second_input=None, clone=True):
+    """Returns activations at specified layers."""
+    hooks = []
+    for i in range(len(layer_names)):
+        hooks.append(
+            get_pytorch_module(model, layer_names[i]).register_forward_hook(
+                hook_acts))
+
+    acts_res = [a for a in
+                get_acts(model, input, second_input=second_input, clone=clone)]
+
+    for h in hooks:
+        h.remove()
+
+    return acts_res
 
 
 def get_linear_scheduler(optimizer, num_epochs, last_epoch=-1):
@@ -124,7 +232,10 @@ def create_area_target(mask, area):
     """Create target label for area norm loss."""
     size = mask.numel()
     target = torch.ones(size)
-    target[:int(size * (1-area))] = 0
+    if area >= 1:
+        target[:int(size-area)] = 0
+    else:
+        target[:int(size * (1-area))] = 0
     return target
 
 
